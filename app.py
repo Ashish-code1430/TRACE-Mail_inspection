@@ -1,8 +1,9 @@
-
+```python
 import html
 import ipaddress
 import json
 import re
+import tempfile
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
@@ -14,21 +15,25 @@ import gradio as gr
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-PROJECT_DIR = Path("/content/drive1/MyDrive/TRACE-Mail-Project")
-MODEL_DIR = PROJECT_DIR / "03_Models/TRACE_Mail_CPU_5000"
-REPORT_DIR = PROJECT_DIR / "04_Forensics/reports"
+PROJECT_DIR = Path(__file__).resolve().parent
+MODEL_DIR = PROJECT_DIR / "03_Models" / "TRACE_Mail_CPU_5000"
+REPORT_DIR = PROJECT_DIR / "reports"
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-tokenizer = AutoTokenizer.from_pretrained(
-    str(MODEL_DIR),
-    local_files_only=True
-)
+if not MODEL_DIR.exists():
+    MODEL_DIR = Path("/content/drive1/MyDrive/TRACE-Mail-Project/03_Models/TRACE_Mail_CPU_5000")
 
+if not MODEL_DIR.exists():
+    raise FileNotFoundError(
+        "Model directory not found. Place TRACE_Mail_CPU_5000 inside "
+        "the 03_Models folder next to app.py, or update MODEL_DIR."
+    )
+
+tokenizer = AutoTokenizer.from_pretrained(str(MODEL_DIR), local_files_only=True)
 model = AutoModelForSequenceClassification.from_pretrained(
     str(MODEL_DIR),
     local_files_only=True
 )
-
 model.to("cpu")
 model.eval()
 
@@ -286,28 +291,12 @@ def highlight_text(text, matches):
 
 def analyze_email(file_path):
     if not file_path:
-        return (
-            "<div class='trace-note'>Upload an .eml file to begin analysis.</div>",
-            "",
-            "<div class='trace-note'>No email analyzed yet.</div>",
-            "<div class='trace-note'>No findings available.</div>",
-            [],
-            {},
-            None
-        )
+        raise gr.Error("Please paste an email or upload an .eml file.")
 
     path = Path(file_path)
 
     if not path.is_file() or path.suffix.lower() != ".eml":
-        return (
-            "<div class='trace-note'>Please upload a valid .eml file.</div>",
-            "",
-            "<div class='trace-note'>Invalid file.</div>",
-            "<div class='trace-note'>No findings available.</div>",
-            [],
-            {},
-            None
-        )
+        raise gr.Error("Please provide a valid .eml file or paste email text.")
 
     try:
         email_data = extract_email(path)
@@ -317,6 +306,9 @@ def analyze_email(file_path):
         reply_to = email_data["reply_to"]
         body = email_data["body"]
         full_text = f"Subject: {subject}\n{body}".strip()
+
+        if not full_text.strip():
+            raise gr.Error("No readable email text was found.")
 
         inputs = tokenizer(
             full_text,
@@ -363,10 +355,11 @@ def analyze_email(file_path):
 
         for match in re.finditer(url_pattern, full_text, re.I):
             raw_url = match.group(0).rstrip(".,;:!?)\u005d")
+
             if raw_url in seen_urls:
                 continue
-            seen_urls.add(raw_url)
 
+            seen_urls.add(raw_url)
             normalized = raw_url if raw_url.lower().startswith(("http://", "https://")) else "http://" + raw_url
             parsed = urlparse(normalized)
             hostname = parsed.hostname or ""
@@ -384,6 +377,7 @@ def analyze_email(file_path):
                 score += 2
 
             is_ip = False
+
             try:
                 ipaddress.ip_address(hostname)
                 is_ip = True
@@ -499,12 +493,15 @@ def analyze_email(file_path):
 
         if findings:
             finding_cards = []
+
             for item in findings:
                 severity = item.get("severity", "low")
                 badge_class = "trace-" + severity
                 observed = item.get("observed", "")
+
                 if isinstance(observed, (list, dict)):
                     observed = json.dumps(observed, ensure_ascii=False)
+
                 finding_cards.append(f"""
                 <div class="trace-finding">
                   <div style="font-weight:750">
@@ -516,6 +513,7 @@ def analyze_email(file_path):
                   <div class="trace-muted">Evidence: {html.escape(str(observed))}</div>
                 </div>
                 """)
+
             findings_html = (
                 "<div class='trace-section'><h3>Forensic Findings</h3>"
                 + "".join(finding_cards) + "</div>"
@@ -528,6 +526,7 @@ def analyze_email(file_path):
             )
 
         url_rows = []
+
         for item in urls:
             indicator_text = ", ".join(item["indicators"]) or "No URL rule triggered"
             url_rows.append([
@@ -557,7 +556,7 @@ def analyze_email(file_path):
 
         report = {
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-            "model": "TRACE_Mail_CPU_5000",
+            "model": MODEL_DIR.name,
             "predicted_class": predicted_class,
             "model_confidence_percent": model_confidence,
             "class_scores_percent": class_probabilities,
@@ -613,6 +612,8 @@ def analyze_email(file_path):
             str(report_path)
         )
 
+    except gr.Error:
+        raise
     except Exception as error:
         error_html = (
             "<div class='trace-section'><h3>Analysis failed</h3>"
@@ -628,6 +629,42 @@ def analyze_email(file_path):
             {"error": type(error).__name__, "message": str(error)},
             None
         )
+
+def analyze_email_input(uploaded_file, pasted_email):
+    if pasted_email and pasted_email.strip():
+        email_content = pasted_email.strip()
+
+        if not re.search(
+            r"(?m)^(From|To|Cc|Bcc|Date|Subject|Reply-To|Message-ID):",
+            email_content
+        ):
+            email_content = "Subject: Pasted email\n\n" + email_content
+        elif "\n\n" not in email_content and "\r\n\r\n" not in email_content:
+            email_content += "\n\n"
+
+        temp_path = None
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".eml",
+                encoding="utf-8",
+                newline="",
+                delete=False
+            ) as temp_file:
+                temp_file.write(email_content)
+                temp_path = temp_file.name
+
+            return analyze_email(temp_path)
+
+        finally:
+            if temp_path and Path(temp_path).exists():
+                Path(temp_path).unlink()
+
+    if uploaded_file:
+        return analyze_email(uploaded_file)
+
+    raise gr.Error("Please paste an email or upload an .eml file.")
 
 with gr.Blocks(
     title="TRACE-Mail | Email Threat Intelligence",
@@ -655,23 +692,31 @@ with gr.Blocks(
     with gr.Row():
         with gr.Column(scale=1):
             email_file = gr.File(
-                label="Upload an email file",
+                label="Upload an email file (.eml)",
                 file_types=[".eml"],
                 type="filepath"
             )
+
+            email_text = gr.Textbox(
+                label="Or paste your email here",
+                placeholder="Paste your complete email here...\n\nFrom: sender@example.com\nTo: recipient@example.com\nSubject: Urgent account verification\n\nEmail body...",
+                lines=12,
+                max_lines=25
+            )
+
             analyze_button = gr.Button(
                 "🔍 Analyze Email",
                 variant="primary",
                 size="lg"
             )
+
             gr.Markdown(
-                "Analysis runs on the saved model. "
+                "Paste an email or upload an .eml file. "
                 "Suspicious links are not opened."
             )
+
         with gr.Column(scale=2):
-            summary_output = gr.HTML(
-                label="Analysis overview"
-            )
+            summary_output = gr.HTML(label="Analysis overview")
 
     risk_output = gr.HTML(label="Risk indicator")
 
@@ -703,8 +748,8 @@ with gr.Blocks(
     """)
 
     analyze_button.click(
-        fn=analyze_email,
-        inputs=[email_file],
+        fn=analyze_email_input,
+        inputs=[email_file, email_text],
         outputs=[
             summary_output,
             risk_output,
@@ -717,4 +762,10 @@ with gr.Blocks(
     )
 
 if __name__ == "__main__":
-    demo.launch(share=True, debug=False)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=True,
+        debug=False
+    )
+```
