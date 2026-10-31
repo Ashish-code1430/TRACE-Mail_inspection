@@ -1,0 +1,7 @@
+streamlit
+torch
+transformers
+safetensors
+pandas
+numpy
+beautifulsoup4
