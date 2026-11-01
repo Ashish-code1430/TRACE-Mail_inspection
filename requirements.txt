@@ -1,7 +1,5 @@
-streamlit
+
+gradio
 torch
 transformers
 safetensors
-pandas
-numpy
-beautifulsoup4
