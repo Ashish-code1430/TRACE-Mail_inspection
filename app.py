@@ -1,4 +1,4 @@
-```python
+
 import html
 import ipaddress
 import json
@@ -770,4 +770,4 @@ demo.launch(
     share=False,
     debug=False
 )
-```
+
