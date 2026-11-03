@@ -1,4 +1,4 @@
-        return analyze_email(uploaded_file)
+             return analyze_email(uploaded_file)
 
     pasted_email = (pasted_email or "").strip()
     if not pasted_email:
